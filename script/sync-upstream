@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+
+# Script to sync upstream babashka.core changes and prepare a release
+# This can be run locally or in CI
+
+set -euo pipefail
+
+# Configuration
+UPSTREAM_CORE_REPO="https://github.com/babashka/babashka.core.git"
+FEATURE_BRANCH="greenways/fn"
+RELEASE_BRANCH="master"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+
+cd "$ROOT_DIR"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+log() {
+    echo -e "${GREEN}[sync-upstream]${NC} $1"
+}
+
+warn() {
+    echo -e "${YELLOW}[sync-upstream]${NC} $1"
+}
+
+error() {
+    echo -e "${RED}[sync-upstream]${NC} $1"
+}
+
+# Check if we're in a git repo
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    error "Not in a git repository"
+    exit 1
+fi
+
+# Check for uncommitted changes
+if ! git diff-index --quiet HEAD --; then
+    error "You have uncommitted changes. Please commit or stash them first."
+    exit 1
+fi
+
+# Parse arguments
+FORCE=false
+VERSION_BUMP="patch"
+DRY_RUN=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --force)
+            FORCE=true
+            shift
+            ;;
+        --version-bump)
+            VERSION_BUMP="$2"
+            shift 2
+            ;;
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --help)
+            cat << 'EOF'
+Usage: script/sync-upstream [OPTIONS]
+
+Sync upstream babashka.core changes and prepare a release.
+
+OPTIONS:
+    --force           Force sync even if no changes detected
+    --version-bump    Version bump type: patch (default), minor, or major
+    --dry-run         Show what would be done without making changes
+    --help            Show this help message
+
+EXAMPLES:
+    script/sync-upstream
+    script/sync-upstream --version-bump minor
+    script/sync-upstream --force --dry-run
+EOF
+            exit 0
+            ;;
+        *)
+            error "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Fetch latest from babashka.core
+log "Fetching latest from babashka.core..."
+cd babashka.core
+git fetch origin main
+
+LATEST_CORE_COMMIT=$(git rev-parse origin/main)
+CURRENT_CORE_COMMIT=$(git rev-parse HEAD)
+cd ..
+
+log "Latest core commit: $LATEST_CORE_COMMIT"
+log "Current core commit: $CURRENT_CORE_COMMIT"
+
+# Check if there are new commits
+if [ "$LATEST_CORE_COMMIT" = "$CURRENT_CORE_COMMIT" ] && [ "$FORCE" = false ]; then
+    log "No new commits in babashka.core. Use --force to sync anyway."
+    exit 0
+fi
+
+CORE_COMMIT_MSG=$(cd babashka.core && git log -1 --pretty=format:'%s' origin/main)
+log "Latest commit message: $CORE_COMMIT_MSG"
+
+if [ "$DRY_RUN" = true ]; then
+    warn "DRY RUN MODE - No changes will be made"
+    log "Would update babashka.core submodule to: $LATEST_CORE_COMMIT"
+    log "Would merge $FEATURE_BRANCH into $RELEASE_BRANCH"
+    log "Would bump version ($VERSION_BUMP)"
+    exit 0
+fi
+
+# Update submodule
+log "Updating babashka.core submodule..."
+cd babashka.core
+git checkout main
+git pull origin main
+cd ..
+
+# Commit submodule update
+git add babashka.core
+if git diff --cached --quiet; then
+    log "No submodule changes to commit"
+else
+    git commit -m "chore: update babashka.core submodule to $CORE_COMMIT_MSG"
+    log "Committed submodule update"
+fi
+
+# Fetch and rebase feature branch
+log "Fetching and rebasing $FEATURE_BRANCH..."
+git fetch origin $FEATURE_BRANCH
+git checkout -B $FEATURE_BRANCH origin/$FEATURE_BRANCH
+
+# Try to rebase on master
+git fetch origin $RELEASE_BRANCH
+if git rebase origin/$RELEASE_BRANCH; then
+    log "Successfully rebased $FEATURE_BRANCH on $RELEASE_BRANCH"
+else
+    warn "Rebase failed, attempting merge instead..."
+    git rebase --abort || true
+    if git merge origin/$RELEASE_BRANCH --no-edit; then
+        log "Successfully merged $RELEASE_BRANCH into $FEATURE_BRANCH"
+    else
+        error "Merge failed! Manual intervention required."
+        git merge --abort || true
+        exit 1
+    fi
+fi
+
+# Merge feature branch into release branch
+log "Merging $FEATURE_BRANCH into $RELEASE_BRANCH..."
+git checkout $RELEASE_BRANCH
+git merge $FEATURE_BRANCH --no-edit -m "feat: add IFn and IPersistentMap support for deftype
+
+Sync with babashka.core @ $LATEST_CORE_COMMIT
+
+Changes:
+- Add SciFn.java for IFn support in deftype
+- Add SciMapFn.java for IPersistentMap support
+- Update deftype implementation"
+
+# Bump version
+log "Bumping version ($VERSION_BUMP)..."
+CURRENT_VERSION=$(cat resources/BABASHKA_VERSION)
+log "Current version: $CURRENT_VERSION"
+
+# Extract version components
+if [[ $CURRENT_VERSION =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+    MAJOR="${BASH_REMATCH[1]}"
+    MINOR="${BASH_REMATCH[2]}"
+    PATCH="${BASH_REMATCH[3]}"
+else
+    warn "Version format not recognized, defaulting to 1.12.0"
+    MAJOR=1; MINOR=12; PATCH=0
+fi
+
+case "$VERSION_BUMP" in
+    major)
+        MAJOR=$((MAJOR + 1))
+        MINOR=0
+        PATCH=0
+        ;;
+    minor)
+        MINOR=$((MINOR + 1))
+        PATCH=0
+        ;;
+    patch|*)
+        PATCH=$((PATCH + 1))
+        ;;
+esac
+
+NEW_VERSION="$MAJOR.$MINOR.$PATCH-greenways"
+echo "$NEW_VERSION" > resources/BABASHKA_VERSION
+
+log "New version: $NEW_VERSION"
+
+# Commit version bump
+git add resources/BABASHKA_VERSION
+git commit -m "chore: bump version to $NEW_VERSION [skip ci]"
+
+# Push changes
+log "Pushing changes to origin..."
+git push origin $RELEASE_BRANCH
+git push origin $FEATURE_BRANCH
+
+# Create tag
+git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
+git push origin "v$NEW_VERSION"
+
+log "✅ Sync complete!"
+log "New version: $NEW_VERSION"
+log "Changes pushed to $RELEASE_BRANCH"
