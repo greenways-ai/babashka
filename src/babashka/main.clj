@@ -119,7 +119,7 @@
 (defn parse-version [version]
   (mapv #(Integer/parseInt %)
         (-> version
-            (str/replace "-SNAPSHOT" "")
+            (str/replace #"-.*" "")  ; Strip any suffix after dash
             (str/split #"\."))))
 (def version-data (parse-version version))
 
@@ -382,7 +382,10 @@ Use bb run --help to show this help output.
        'babashka.core bbcore/core-namespace
        'babashka.impl.deftype (let [dns (sci/create-ns 'babashka.impl.deftype nil)]
                                 {'->scimap (sci/copy-var bb-deftype/->scimap dns)
-                                 '->scifn (sci/copy-var bb-deftype/->scifn dns)})
+                                 '->scifn (sci/copy-var bb-deftype/->scifn dns)
+                                 'sci-type (sci/copy-var bb-deftype/sci-type dns)
+                                 'sci-instance? (sci/copy-var bb-deftype/sci-instance? dns)
+                                 'register-type! (sci/copy-var bb-deftype/register-type! dns)})
        'babashka.nrepl.server nrepl-server-namespace
        'babashka.wait wait-namespace
        'babashka.signal signal-ns

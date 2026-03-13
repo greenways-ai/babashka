@@ -1,6 +1,0 @@
-{:paths ["script"]
- :deps {borkdude/gh-release-artifact
-        #_{:local/root "../gh-release-artifact"}
-        {:git/url "https://github.com/borkdude/gh-release-artifact"
-         :git/sha "4a9a74f0e50e897c45df8cc70684360eb30fce80"}}
- :tasks {release-artifact babashka.release-artifact/release}}
